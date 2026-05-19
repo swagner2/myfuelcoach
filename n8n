@@ -1,0 +1,175 @@
+{
+  "name": "Daily Workout Fueling Email",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5 * * *"
+            }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1280, 0]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// ============================================================\n// EDIT THIS PROFILE — your stats, prefs, and email\n// ============================================================\nconst profile = {\n  email: 'steven@salesignition.com',\n  bodyWeightKg: 75,            // <-- update\n  sex: 'M',\n  preferences: ['high-protein', 'mediterranean'],\n  dislikes: [],                // e.g. ['cilantro']\n  vegetarian: false,\n  allergies: [],\n  cuisinePreference: 'flexible',\n  timezone: 'America/New_York'\n};\n\n// Compute today + last-7-day range in the configured timezone\nconst nowStr = new Date().toLocaleString('en-CA', { timeZone: profile.timezone, year:'numeric', month:'2-digit', day:'2-digit' });\nconst today = nowStr; // YYYY-MM-DD\nconst d = new Date(today + 'T00:00:00');\nconst start = new Date(d);\nstart.setDate(d.getDate() - 6);\nconst pad = n => String(n).padStart(2, '0');\nconst weekStart = `${start.getFullYear()}-${pad(start.getMonth()+1)}-${pad(start.getDate())}`;\n\nreturn [{ json: { profile, today, weekStart } }];"
+      },
+      "id": "node-init",
+      "name": "Init",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1060, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://intervals.icu/api/v1/athlete/2694494/events",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "oldest", "value": "={{ $('Init').first().json.today }}" },
+            { "name": "newest", "value": "={{ $('Init').first().json.today }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-today-events",
+      "name": "TodayEvents",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-840, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://intervals.icu/api/v1/athlete/2694494/events",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "oldest", "value": "={{ $('Init').first().json.weekStart }}" },
+            { "name": "newest", "value": "={{ $('Init').first().json.today }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-weekly-events",
+      "name": "WeeklyEvents",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-620, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://intervals.icu/api/v1/athlete/2694494/wellness",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "oldest", "value": "={{ $('Init').first().json.weekStart }}" },
+            { "name": "newest", "value": "={{ $('Init').first().json.today }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-weekly-wellness",
+      "name": "WeeklyWellness",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-400, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Compute workout context + macro targets\nconst init = $('Init').first().json;\nconst profile = init.profile;\nconst bw = profile.bodyWeightKg;\n\n// HTTP Request returns body as $json (or as array of items if response is an array — handle both)\nfunction toArray(name) {\n  const items = $(name).all().map(i => i.json);\n  // If n8n already split a JSON-array response into items, items === the array\n  if (items.length === 1 && Array.isArray(items[0])) return items[0];\n  // Otherwise the array IS the multiple items\n  return items.filter(x => x && typeof x === 'object');\n}\n\nconst todayEvents = toArray('TodayEvents');\nconst weeklyEvents = toArray('WeeklyEvents');\nconst weeklyWellness = toArray('WeeklyWellness');\n\n// Pick today's primary workout (skip 'NOTE' category, prefer WORKOUT)\nconst todays = todayEvents.filter(e => e && e.category !== 'NOTE');\nconst workout = todays[0] || null;\n\nfunction restDay() {\n  return {\n    type: 'rest',\n    name: 'Rest day',\n    durationMin: 0,\n    tss: 0,\n    kJ: 0,\n    kcalBurned: 0,\n    intensity: 'rest',\n    description: '',\n    indoor: false\n  };\n}\n\nfunction summarizeWorkout(w) {\n  if (!w) return restDay();\n  const durationMin = Math.round((w.moving_time || 0) / 60);\n  const tss = Math.round(w.icu_training_load || 0);\n  const kJ = Math.round((w.joules || 0) / 1000);\n  const kcalBurned = kJ; // ~1 kcal per kJ of mechanical work for cycling\n  let intensity = 'easy';\n  if (tss >= 70 || durationMin >= 90) intensity = 'hard';\n  else if (tss >= 40 || durationMin >= 60) intensity = 'moderate';\n  return {\n    type: w.type || 'Workout',\n    name: w.name || 'Workout',\n    durationMin,\n    tss,\n    kJ,\n    kcalBurned,\n    intensity,\n    description: (w.description || '').slice(0, 500),\n    indoor: !!w.indoor,\n    startLocal: w.start_date_local || null\n  };\n}\n\nconst wo = summarizeWorkout(workout);\n\n// Macro targets\nfunction buildTargets(intensity, durationMin) {\n  if (intensity === 'rest') {\n    return {\n      pre: null,\n      during: null,\n      post: null,\n      daily: {\n        carbsG: Math.round(3 * bw),\n        proteinG: Math.round(1.8 * bw),\n        fatG: Math.round(1.0 * bw),\n        notes: 'Lower-carb, protein-forward day. Emphasize whole foods, hydration, electrolytes.'\n      }\n    };\n  }\n  const carbMultPre = intensity === 'hard' ? 1.5 : intensity === 'moderate' ? 1.0 : 0.6;\n  const pre = {\n    window: '2-3 hours before',\n    carbsG: Math.round(carbMultPre * bw),\n    proteinG: Math.round(0.3 * bw),\n    fatG: '<15g (keep low to ease digestion)',\n    fiberG: 'low (<5g)',\n    notes: 'Familiar foods only. Avoid new ingredients pre-session.'\n  };\n  const during = durationMin >= 90 ? {\n    carbsPerHour: intensity === 'hard' ? '60-90g' : '30-60g',\n    notes: 'Sip throughout. Mix glucose+fructose (e.g. 2:1) if >60g/hr to avoid GI distress.'\n  } : null;\n  const post = {\n    window: 'within 60 minutes',\n    carbsG: Math.round(1.0 * bw),\n    proteinG: Math.round(0.3 * bw),\n    fatG: 'moderate (fine to include)',\n    notes: 'Front-load protein within first hour. Hydrate with sodium.'\n  };\n  // Hydration estimate\n  const hydrationMl = Math.round(500 + (durationMin / 60) * 600);\n  const sodiumMg = intensity === 'hard' ? 800 : intensity === 'moderate' ? 500 : 300;\n  return { pre, during, post, hydration: { mlDuring: hydrationMl, sodiumMg, notes: 'Higher if hot/humid or you sweat heavily.' } };\n}\n\nconst targets = buildTargets(wo.intensity, wo.durationMin);\n\n// Weekly aggregates\nconst weeklyWorkouts = weeklyEvents.filter(e => e && e.category !== 'NOTE');\nconst weeklyTss = Math.round(weeklyWorkouts.reduce((s, w) => s + (w.icu_training_load || 0), 0));\nconst weeklyKJ = Math.round(weeklyWorkouts.reduce((s, w) => s + ((w.joules || 0) / 1000), 0));\nconst weeklyMinutes = Math.round(weeklyWorkouts.reduce((s, w) => s + ((w.moving_time || 0) / 60), 0));\n\nfunction avg(arr) { if (!arr.length) return null; return arr.reduce((s, n) => s + n, 0) / arr.length; }\nconst sleepScores = weeklyWellness.map(w => w && w.sleepScore).filter(n => typeof n === 'number');\nconst hrvValues = weeklyWellness.map(w => w && w.hrv).filter(n => typeof n === 'number');\nconst rhrValues = weeklyWellness.map(w => w && w.restingHR).filter(n => typeof n === 'number');\nconst readinessValues = weeklyWellness.map(w => w && w.readiness).filter(n => typeof n === 'number');\nconst latestWellness = weeklyWellness.length ? weeklyWellness[weeklyWellness.length - 1] : null;\n\nconst weekly = {\n  workouts: weeklyWorkouts.length,\n  totalTss: weeklyTss,\n  totalKJ: weeklyKJ,\n  totalMinutes: weeklyMinutes,\n  avgSleepScore: sleepScores.length ? Math.round(avg(sleepScores)) : null,\n  avgHrv: hrvValues.length ? Math.round(avg(hrvValues)) : null,\n  avgRestingHR: rhrValues.length ? Math.round(avg(rhrValues)) : null,\n  avgReadiness: readinessValues.length ? Math.round(avg(readinessValues)) : null,\n  todayWellness: latestWellness ? {\n    sleepScore: latestWellness.sleepScore || null,\n    hrv: latestWellness.hrv || null,\n    restingHR: latestWellness.restingHR || null,\n    readiness: latestWellness.readiness || null\n  } : null\n};\n\nreturn [{\n  json: {\n    profile,\n    today: init.today,\n    workout: wo,\n    targets,\n    weekly\n  }\n}];"
+      },
+      "id": "node-macros",
+      "name": "Macros",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-180, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-haiku-4-5\",\n  \"max_tokens\": 2048,\n  \"system\": \"You are a sports nutrition assistant for an endurance athlete. Given workout context and macro targets, suggest exactly 2 pre-workout meals and 2 post-workout meals. Respect dietary preferences, vegetarian flag, allergies, and dislikes. Assume a home kitchen and common grocery-store ingredients. Each meal must include: name (string), prep_minutes (number), ingredients (array of {item, quantity}), macros ({carbs_g, protein_g, fat_g, calories}), rationale (one sentence). Aim macros within +/-15% of the target. Return STRICT JSON only — no prose, no markdown fences. Schema: {\\\"pre\\\":[{...},{...}],\\\"post\\\":[{...},{...}]}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(JSON.stringify($json)) }}\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "node-meals",
+      "name": "Meals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [40, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Parse Claude's response and render HTML email\nconst ctx = $('Macros').first().json;\nconst llmResp = $json;\nlet meals = { pre: [], post: [] };\ntry {\n  const text = llmResp && llmResp.content && llmResp.content[0] && llmResp.content[0].text;\n  if (text) {\n    // Strip code fences if any slipped through\n    const cleaned = text.replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/i, '').trim();\n    meals = JSON.parse(cleaned);\n  }\n} catch (e) {\n  meals = { pre: [], post: [], _error: String(e) };\n}\n\nconst w = ctx.workout;\nconst t = ctx.targets;\nconst wk = ctx.weekly;\nconst esc = s => String(s == null ? '' : s).replace(/[&<>\"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));\n\nfunction mealCard(m) {\n  if (!m) return '';\n  const ingredients = (m.ingredients || []).map(i => `<li>${esc(i.quantity || '')} ${esc(i.item || i)}</li>`).join('');\n  const macros = m.macros || {};\n  return `\n    <div style=\"border:1px solid #e3e3e3;border-radius:8px;padding:14px;margin:8px 0;background:#fff;\">\n      <div style=\"font-weight:600;font-size:15px;margin-bottom:4px;\">${esc(m.name || 'Meal')}</div>\n      <div style=\"color:#666;font-size:12px;margin-bottom:8px;\">${esc(m.prep_minutes || '?')} min prep &middot; ${esc(macros.carbs_g || '?')}C / ${esc(macros.protein_g || '?')}P / ${esc(macros.fat_g || '?')}F &middot; ${esc(macros.calories || '?')} kcal</div>\n      <ul style=\"margin:6px 0 8px 18px;padding:0;font-size:13px;color:#333;\">${ingredients}</ul>\n      <div style=\"font-size:12px;color:#555;font-style:italic;\">${esc(m.rationale || '')}</div>\n    </div>`;\n}\n\nconst isRest = w.intensity === 'rest';\n\nconst preTargetRow = t.pre ? `\n  <tr><td style=\"padding:6px 10px;color:#666;\">Pre (${esc(t.pre.window)})</td>\n  <td style=\"padding:6px 10px;\">${esc(t.pre.carbsG)}g carbs &middot; ${esc(t.pre.proteinG)}g protein &middot; ${esc(t.pre.fatG)}</td></tr>` : '';\nconst duringTargetRow = t.during ? `\n  <tr><td style=\"padding:6px 10px;color:#666;\">During</td>\n  <td style=\"padding:6px 10px;\">${esc(t.during.carbsPerHour)} carbs/hr</td></tr>` : '';\nconst postTargetRow = t.post ? `\n  <tr><td style=\"padding:6px 10px;color:#666;\">Post (${esc(t.post.window)})</td>\n  <td style=\"padding:6px 10px;\">${esc(t.post.carbsG)}g carbs &middot; ${esc(t.post.proteinG)}g protein</td></tr>` : '';\nconst hydration = t.hydration ? `\n  <tr><td style=\"padding:6px 10px;color:#666;\">Hydration</td>\n  <td style=\"padding:6px 10px;\">${esc(t.hydration.mlDuring)} ml during &middot; ~${esc(t.hydration.sodiumMg)} mg sodium</td></tr>` : '';\n\nconst restBlock = isRest ? `\n  <p style=\"color:#444;\">No workout planned today. Recovery focus: protein-forward meals, hydration, mobility.</p>\n  <table style=\"border-collapse:collapse;font-size:13px;\">\n    <tr><td style=\"padding:6px 10px;color:#666;\">Daily target</td><td style=\"padding:6px 10px;\">${esc(t.daily.carbsG)}g C &middot; ${esc(t.daily.proteinG)}g P &middot; ${esc(t.daily.fatG)}g F</td></tr>\n  </table>` : '';\n\nconst weeklyLine = `${wk.workouts} workouts &middot; ${wk.totalMinutes} min &middot; TSS ${wk.totalTss} &middot; ${wk.totalKJ} kJ` +\n  (wk.avgSleepScore ? ` &middot; sleep ${wk.avgSleepScore}` : '') +\n  (wk.avgHrv ? ` &middot; HRV ${wk.avgHrv}` : '') +\n  (wk.avgReadiness ? ` &middot; readiness ${wk.avgReadiness}` : '');\n\nconst html = `<!doctype html><html><body style=\"font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#222;background:#f6f7f9;padding:24px;\">\n<div style=\"max-width:680px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;\">\n  <div style=\"font-size:12px;color:#888;letter-spacing:0.04em;text-transform:uppercase;\">${esc(ctx.today)}</div>\n  <h1 style=\"font-size:22px;margin:6px 0 2px;\">${esc(w.name)}</h1>\n  <div style=\"color:#555;font-size:14px;margin-bottom:14px;\">\n    ${esc(w.type)}${w.indoor ? ' (indoor)' : ''} &middot; ${esc(w.durationMin)} min &middot; TSS ${esc(w.tss)} &middot; ${esc(w.kJ)} kJ &middot; <strong style=\"text-transform:capitalize;\">${esc(w.intensity)}</strong> intensity\n  </div>\n  ${w.description ? `<details style=\"margin-bottom:14px;\"><summary style=\"cursor:pointer;color:#444;font-size:13px;\">Workout details</summary><pre style=\"white-space:pre-wrap;font-size:12px;color:#555;background:#fafafa;padding:10px;border-radius:6px;\">${esc(w.description)}</pre></details>` : ''}\n\n  <div style=\"background:#f0f4f8;border-radius:8px;padding:10px 14px;font-size:13px;color:#333;margin-bottom:18px;\">\n    <strong>Last 7 days:</strong> ${weeklyLine}\n  </div>\n\n  ${isRest ? restBlock : `\n  <h2 style=\"font-size:15px;margin:18px 0 6px;\">Macro targets</h2>\n  <table style=\"border-collapse:collapse;font-size:13px;width:100%;\">\n    ${preTargetRow}\n    ${duringTargetRow}\n    ${postTargetRow}\n    ${hydration}\n  </table>\n\n  <h2 style=\"font-size:15px;margin:22px 0 4px;\">Pre-workout options</h2>\n  ${(meals.pre || []).map(mealCard).join('') || '<div style=\"color:#999;font-size:13px;\">No options generated.</div>'}\n\n  <h2 style=\"font-size:15px;margin:22px 0 4px;\">Post-workout options</h2>\n  ${(meals.post || []).map(mealCard).join('') || '<div style=\"color:#999;font-size:13px;\">No options generated.</div>'}\n  `}\n\n  <div style=\"margin-top:24px;color:#999;font-size:11px;\">Generated by n8n &middot; intervals.icu + Claude</div>\n</div>\n</body></html>`;\n\nconst subject = isRest\n  ? `Rest day — recovery fuel (${ctx.today})`\n  : `Fuel: ${w.name} (${w.durationMin}m, TSS ${w.tss})`;\n\nreturn [{ json: { subject, html, to: ctx.profile.email, _meals: meals } }];"
+      },
+      "id": "node-render",
+      "name": "RenderEmail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "node-send",
+      "name": "SendEmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [480, 0]
+    }
+  ],
+  "connections": {
+    "Schedule":       { "main": [[{ "node": "Init",           "type": "main", "index": 0 }]] },
+    "Init":           { "main": [[{ "node": "TodayEvents",    "type": "main", "index": 0 }]] },
+    "TodayEvents":    { "main": [[{ "node": "WeeklyEvents",   "type": "main", "index": 0 }]] },
+    "WeeklyEvents":   { "main": [[{ "node": "WeeklyWellness", "type": "main", "index": 0 }]] },
+    "WeeklyWellness": { "main": [[{ "node": "Macros",         "type": "main", "index": 0 }]] },
+    "Macros":         { "main": [[{ "node": "Meals",          "type": "main", "index": 0 }]] },
+    "Meals":          { "main": [[{ "node": "RenderEmail",    "type": "main", "index": 0 }]] },
+    "RenderEmail":    { "main": [[{ "node": "SendEmail",      "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "timezone": "America/New_York",
+    "executionOrder": "v1"
+  },
+  "active": false
+}
